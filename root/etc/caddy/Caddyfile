@@ -1,0 +1,59 @@
+# 此配置文件路径: /etc/caddy/Caddyfile
+# 下面是 proxy 模式生成 Caddyfile 的样例 (通用值).
+# 手动模式 (Caddyfile) 下, 本文件内容即你实际使用的配置, 可任意写 Caddy 支持的语法.
+
+{
+	auto_https disable_redirects
+
+	aliyun_ddns {
+		access_key_id     <ACCESS_KEY_ID>
+		access_key_secret <ACCESS_KEY_SECRET>
+		region_id         cn-hangzhou
+
+		domains {
+	example.com @
+		}
+
+		versions       ipv4
+		ip_source      interface pppoe-wan
+		check_interval 5m
+		ttl            60s
+	}
+}
+
+example.com:8443 {
+	tls {
+		dns alidns {
+			access_key_id <ACCESS_KEY_ID>
+			access_key_secret <ACCESS_KEY_SECRET>
+		}
+	}
+
+	header -Server
+
+	request_body max_size 0
+
+	@health path /health
+	@apikey header Authorization "Bearer <API_KEY>"
+
+	handle @health {
+		reverse_proxy 192.168.1.x:8080 { flush_interval -1 }
+	}
+
+	handle @apikey {
+		reverse_proxy 192.168.1.x:8080 { flush_interval -1 }
+	}
+
+	handle {
+		respond 404 "Not Found" { close }
+	}
+
+	log {
+		output file /tmp/caddy/requests.log {
+			roll_size     1MiB
+			roll_local_time
+			roll_keep     5
+			roll_keep_for 120h
+		}
+	}
+}

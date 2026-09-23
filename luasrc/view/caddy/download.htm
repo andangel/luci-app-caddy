@@ -1,0 +1,27 @@
+<%+cbi/valueheader%>
+<script type="text/javascript">//<![CDATA[
+	function caddy_download(btn)
+	{
+		btn.disabled = true;
+		btn.value = '<%:下载中...%>';
+		XHR.get('<%=luci.dispatcher.build_url("admin", "network", "caddy", "download")%>',
+			null,
+			function(x, rv)
+			{
+				var tb = document.getElementById('<%=self.option%>-status');
+				if (tb) {
+					var color = (rv && rv.ok) ? '#008000' : '#DB7093';
+					var msg = (rv && rv.msg) ? (rv.msg + '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : '';
+					tb.innerHTML = "<br><font color='#FF00FF'><%:状态：%></font>" +
+						"<font color='" + color + "'>" + msg + "</font>";
+				}
+				btn.disabled = false;
+				btn.value = '<%:下载%>';
+			}
+		);
+		return false;
+	}
+//]]></script>
+<input type="button" class="btn cbi-button cbi-button-apply" value="<%:下载%>" onclick="return caddy_download(this)" />
+<span id="<%=self.option%>-status"><em><%=self.value%></em></span>
+<%+cbi/valuefooter%>
