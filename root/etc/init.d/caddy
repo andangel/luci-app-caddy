@@ -211,7 +211,10 @@ generate_caddyfile() {
 				echo "	}"
 				echo
 				echo "	handle {"
-				echo "		respond 404 \"Not Found\" { close }"
+				# 无 key 的兜底: 空 body 的 404 (不回 "Not Found" 文本, 不泄露身份)
+				# 注意: respond 带 body 文本 + 尾部 { close } 子块时 Caddyfile 参数错位
+				# (404→body, 文本→status), 运行时 Atoi 炸 500. 故 body 留空.
+				echo "		respond 404 { close }"
 				echo "	}"
 			else
 				echo
