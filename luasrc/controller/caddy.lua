@@ -1,5 +1,8 @@
 module("luci.controller.caddy", package.seeall)
 
+local DL_DEFAULT = "https://github.com/andangel/luci-app-caddy/releases/latest/download/caddy_linux_arm64"
+local DL_API     = "https://api.github.com/repos/andangel/luci-app-caddy/releases/latest"
+
 function index()
 	entry({"admin", "network", "caddy"}, alias("admin", "network", "caddy", "basic"), _("Caddy"), 30)
 	entry({"admin", "network", "caddy", "basic"}, cbi("caddy/caddy"), _("状态"), 1).leaf = true
@@ -12,6 +15,8 @@ function index()
 	entry({"admin", "network", "caddy", "clear_log"}, call("clear_log")).leaf = true
 	entry({"admin", "network", "caddy", "admin_info"}, call("admin_info")).leaf = true
 	entry({"admin", "network", "caddy", "download"}, call("download")).leaf = true
+	entry({"admin", "network", "caddy", "download_status"}, call("download_status")).leaf = true
+	entry({"admin", "network", "caddy", "download_ctl"}, call("download_ctl")).leaf = true
 end
 
 function caddy_status()
@@ -96,35 +101,142 @@ function admin_info()
 	luci.http.write_json({ validate = validate })
 end
 
+function download_status()
+	local st = { state = "idle", size = 0, total = 0, speed = 0, msg = "" }
+	local f = io.open("/tmp/caddy_dl.status", "r")
+	if f then
+		for line in f:lines() do
+			local k, v = line:match("^([%a_]+)=(.*)$")
+			if k then st[k] = v end
+		end
+		f:close()
+	end
+	st.size  = tonumber(st.size) or 0
+	st.total = tonumber(st.total) or 0
+	st.speed = tonumber(st.speed) or 0
+	-- 看门狗: 活动状态下 status 由下载进程每秒刷新一次并带 ts 时间戳 (该 lua 桥无 os.stat, 不靠文件 mtime),
+	-- 若 >60s 没刷新说明进程已丢失 (被 OOM/清理 SIGKILL 不执行 trap), 状态文件残留会导致 UI 永远下载中
+	local actives = { downloading = 1, paused = 1, verifying = 1 }
+	local ts = tonumber(st.ts) or 0
+	if actives[st.state] and ts > 0 and os.time() - ts > 60 then
+		st.state = "lost"
+		st.speed = 0
+		st.msg = (st.size > 0) and "下载进程已丢失 (保留进度, 点[下载并重启]续传)" or "状态异常 (点[下载并重启]重新开始)"
+	end
+	luci.http.prepare_content("application/json")
+	luci.http.write_json(st)
+end
+
+-- 暂停/继续/停止: 写一个控制命令到 /tmp/caddy_dl.ctl, 下载进程每秒轮询处理.
+-- 暂停=SIGSTOP 冻结 curl (连接仍挂着, 不额外撞 GitHub); 继续=SIGCONT; 停止=杀 curl 留已下部分.
+function download_ctl()
+	-- 本 runtime (Luci openwrt-25.12 / ucode 桥) 的 luci.http 不提供 readrequest, 用 formvalue 读 POST 字段
+	local act  = tostring(luci.http.formvalue("act") or "")
+	local ok, msg = false, ""
+	if act == "pause" or act == "resume" or act == "stop" then
+		local f = io.open("/tmp/caddy_dl.ctl", "w")
+		if f then f:write(act .. "\n"); f:close(); ok = true; msg = "ok" end
+	else
+		msg = "unknown act: " .. act
+	end
+	luci.http.prepare_content("application/json")
+	luci.http.write_json({ ok = ok, msg = msg })
+end
+
 function download()
 	local uci = require "luci.model.uci".cursor()
-	local r   = { ok = false, msg = "" }
-	local url = uci:get("caddy", "caddy", "download_url")
 	local bin = uci:get("caddy", "caddy", "bin_dir") or "/usr/sbin/caddy"
+	local u   = uci:get("caddy", "caddy", "download_url")
+	local url = (u and u ~= "") and u or DL_DEFAULT
+	local use_sha = (url == DL_DEFAULT) and "1" or "0"
 
-	local tmp = "/tmp/caddy.dl"
-	if not url or url == "" then
-		r.msg = _("请先填写 下载地址")
-	else
-		-- 先下到 /tmp 再 mv, 避免写一半坏掉二进制; 写完校验可执行
-		local code = luci.sys.call(string.format(
-			"curl -L -sfS --connect-timeout 10 --retry 2 -o %s '%s' && chmod +x %s && mv -f %s '%s'",
-			tmp, url, tmp, tmp, bin))
-		if code == 0 then
-			if luci.sys.call(string.format("'%s' -h >/dev/null 2>&1", bin)) == 0 then
-				os.execute("/etc/init.d/caddy restart >/dev/null 2>&1")
-				r.ok  = true
-				r.msg = _("下载完成, 已重启 Caddy")
-			else
-				r.msg = _("下载完成但校验失败, 可能架构不匹配")
-			end
-		else
-			os.execute("rm -f " .. tmp)
-			r.msg = _("下载失败, 检查地址与网络")
-		end
-	end
-
+	local sq = function(s) return s:gsub("'", "'\\''") end
+	local L = {
+		"#!/bin/sh",
+		"URL='" .. sq(url) .. "'",
+		"TMP='/tmp/caddy.dl'",
+		"STATUS='/tmp/caddy_dl.status'",
+		"CTL='/tmp/caddy_dl.ctl'",
+		"BIN='" .. sq(bin) .. "'",
+		"USE_SHA=" .. use_sha,
+		"API='" .. DL_API .. "'",
+		"CURLPID=0; PAUSED=0; STOPTED=0",
+		"rm -f \"$CTL\"",
+		"",
+		"# 写临时文件再原子 mv, 防状态端点读到半截文件而把 UI 误渲染成 idle",
+		"ws(){ printf 'state=%s\\nsize=%s\\ntotal=%s\\nspeed=%s\\nmsg=%s\\nts=%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" $(date +%s) > \"$STATUS.tmp\"; mv -f \"$STATUS.tmp\" \"$STATUS\"; }",
+		"",
+		"PIDFILE='/tmp/caddy_dl.pid'",
+		"# 去重锁: 已有存活实例则直接退出 (防清理漏杀导致多实例竞争写同一文件 / 互相覆盖 status)",
+		"if [ -f \"$PIDFILE\" ]; then OLD=$(cat \"$PIDFILE\" 2>/dev/null); if [ -n \"$OLD\" ] && kill -0 \"$OLD\" 2>/dev/null; then exit 0; fi; fi",
+		"echo $$ > \"$PIDFILE\"",
+		"trap 'rm -f \"$PIDFILE\"' EXIT",
+		"",
+		"# 取总大小: 发 Range bytes=0-0 只下 1 字节, 从 Content-Range: bytes 0-0/TOTAL 抽分母 (比完整 HEAD 稳); GitHub 抖则重试 3 次",
+		"TOT=0",
+		"i=0",
+		'while [ "$i" -lt 3 ]; do',
+		"TOT=$(curl -s -L -r 0-0 --connect-timeout 10 -D - -o /dev/null \"$URL\" 2>/dev/null | tr -d '\\r' | grep -i 'Content-Range:' | grep -oE '[0-9]+/[0-9]+' | awk -F/ '{print $2}' | head -1)",
+		"if [ -n \"$TOT\" ] && [ \"$TOT\" -gt 0 ] 2>/dev/null; then break; fi",
+		"i=$((i+1)); sleep 2",
+		"done",
+		"ws downloading $(wc -c < \"$TMP\" 2>/dev/null || echo 0) \"$TOT\" 0 \"\"",
+		"",
+		"# 直接后台运行 curl (不经函数包一层), 使 $! 即真实 curl pid, 暂停/停止(信号)才能直接作用于 curl",
+		"# GitHub 直连不稳: 除网络类错误外, HTTP/2 reset / -C 续传冲突等瞬时错误也按 --retry 自动再来",
+		"# speed-limit/speed-time: 低于 ~100B/s 持续 45s 视为假死, 触发重试 (比干等 5 分钟超时快)",
+		"curl -L -C - -sS --retry 4 --retry-delay 8 --retry-all-errors --connect-timeout 20 --speed-limit 100 --speed-time 45 -o \"$TMP\" \"$URL\" >> /tmp/caddy_dl.log 2>&1 &",
+		"CURLPID=$!; RC=",
+		"LAST=$(wc -c < \"$TMP\" 2>/dev/null || echo 0); LTIME=$(date +%s)",
+		"# 主循环: 每秒刷新进度 + 处理暂停/继续/停止控制命令 (与下载解耦, 控制端点只写 $CTL 文件)",
+		'while kill -0 "$CURLPID" 2>/dev/null; do',
+		'if [ -f "$CTL" ]; then',
+		'  CMD=$(cat "$CTL" 2>/dev/null); rm -f "$CTL"',
+		'  if [ "$CMD" = "pause" ] && [ $PAUSED -eq 0 ]; then kill -STOP $CURLPID 2>/dev/null; PAUSED=1',
+		'  elif [ "$CMD" = "resume" ] && [ $PAUSED -eq 1 ]; then kill -CONT $CURLPID 2>/dev/null; PAUSED=0',
+		'  elif [ "$CMD" = "stop" ]; then kill $CURLPID 2>/dev/null; STOPTED=1',
+		'  fi',
+		'fi',
+		'if [ $PAUSED -eq 1 ]; then ws paused $(wc -c < "$TMP" 2>/dev/null || echo 0) "$TOT" 0 ""; sleep 1; continue; fi',
+		'SZ=$(wc -c < "$TMP" 2>/dev/null || echo 0)',
+		'NOW=$(date +%s); DT=$((NOW - LTIME)); SP=0',
+		'if [ "$DT" -gt 0 ]; then SP=$(( (SZ - LAST) / DT )); fi',
+		'LAST=$SZ; LTIME=$NOW',
+		'ws downloading "$SZ" "$TOT" "$SP" ""',
+		"# 僵尸检测: curl 死掉但未 wait 收尸时 kill -0 仍成功会卡死主循环, /proc 状态 Z 即已死; 已下满按成功, 否则按失败",
+		'CS=$(awk "{print $3}" /proc/$CURLPID/stat 2>/dev/null)',
+		'if [ "$CS" = "Z" ]; then if [ "$TOT" -gt 0 ] 2>/dev/null && [ "$SZ" -ge "$TOT" ] 2>/dev/null; then RC=0; else RC=128; fi; break; fi',
+		"sleep 1",
+		"done",
+		"# 主循环已判定 (z 检测设了 RC) 则不覆盖; 否则 wait 收尸取真实退出码",
+		'if [ -z "$RC" ]; then wait $CURLPID 2>/dev/null; RC=$?; fi',
+		'SZ=$(wc -c < "$TMP" 2>/dev/null || echo 0)',
+		"if [ $STOPTED -eq 1 ]; then ws stopped \"$SZ\" \"$TOT\" 0 '已停止 (保留已下载部分, 点[下载并重启]可续传)'; exit 0; fi",
+		"if [ \"$RC\" -ne 0 ]; then ws error \"$SZ\" \"$TOT\" 0 '下载失败 (GitHub 波动/网络), 点[下载并重启]可自动续传重试'; exit 0; fi",
+		"if [ \"$USE_SHA\" -eq 1 ]; then",
+		"API_SHA=$(curl -L -sS --connect-timeout 10 --max-time 20 \"$API\" | grep -oE 'sha256:[0-9a-f]{64}' | head -1 | sed 's/sha256://')",
+		"LOC_SHA=$(sha256sum \"$TMP\" 2>/dev/null | awk '{print $1}')",
+		'if [ "${#API_SHA}" -ge 64 ] && [ "${#LOC_SHA}" -ge 64 ] && [ "$API_SHA" != "$LOC_SHA" ]; then',
+		'rm -f "$TMP"; ws error "$SZ" "$TOT" 0 "SHA256 不匹配, 文件可能损坏, 已丢弃, 请重试"; exit 0',
+		"fi",
+		"fi",
+		"# curl -o 落盘不带可执行位, -h 前先 chmod, 否则任何架构 (包括正确 arm64) 都会 Permission denied",
+		"chmod +x \"$TMP\" 2>/dev/null",
+		"if ! \"$TMP\" -h >/dev/null 2>&1; then rm -f \"$TMP\"; ws error \"$SZ\" \"$TOT\" 0 '文件无法执行, 可能架构不匹配 (应为 linux/arm64 静态二进制)'; exit 0; fi",
+		"if ! mv -f \"$TMP\" \"$BIN\"; then ws error \"$SZ\" \"$TOT\" 0 '替换 $BIN 失败'; exit 0; fi",
+		"if /etc/init.d/caddy restart >/dev/null 2>&1; then ws done \"$SZ\" \"$TOT\" 0 '下载完成, 已替换并重启 Caddy'; else ws done \"$SZ\" \"$TOT\" 0 '下载完成并已替换, 但重启 Caddy 失败, 请手动 /etc/init.d/caddy restart'; fi",
+	}
+	local f = io.open("/tmp/caddy_dl.sh", "w")
+	f:write(table.concat(L, "\n") .. "\n")
+	f:close()
+	os.execute("chmod +x /tmp/caddy_dl.sh")
+	-- 先清掉旧的下载进程 (脚本本体 + 它遗留的写 caddy.dl 的 curl 子进程, 否则多实例互相覆盖 status)
+	-- ps 会截断命令行导致漏杀 curl, 故直接扫 /proc/*/cmdline; 用 [.] 自转义 glob 避免匹配到本命令自身
+	os.execute("for p in /proc/[0-9]*; do c=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null); case \"$c\" in *caddy_dl[.]sh*|*caddy[.]dl*) kill ${p##*/} 2>/dev/null;; esac; done; sleep 1; rm -f /tmp/caddy_dl.status")
+	-- nohup 脱离 CGI, 页面刷新也不中断
+	os.execute("nohup sh /tmp/caddy_dl.sh >/dev/null 2>&1 &")
 	luci.http.prepare_content("application/json")
-	luci.http.write_json(r)
+	-- 注意: call 端点内 _ 未注入 (只在 index 阶段有), 这里用字面量; 该消息仅作启动占位, 随即被进度轮询覆盖
+	luci.http.write_json({ ok = true, msg = "已开始后台下载 (支持断点续传), 自动刷新进度..." })
 end
 

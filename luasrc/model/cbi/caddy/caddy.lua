@@ -39,14 +39,11 @@ o = s:option(Value, "bin_dir", translate("主程序"),
 o.default = "/usr/sbin/caddy"
 o.placeholder = "/usr/sbin/caddy"
 
-o = s:option(Value, "download_url", translate("下载地址"),
-	translate("填 caddy 二进制的下载 URL (如 GitHub Release 直链), 右侧按钮下载覆盖 主程序 路径, 并自动重启"))
-o.placeholder = "https://github.com/.../releases/download/.../caddy"
+o = s:option(Value, "download_url", translate("下载地址(可选)"),
+	translate("留空用默认 GitHub latest Release. 填了则用该 URL (可换镜像/固定版本). 下载带重试+SHA256 校验"))
+o.placeholder = "https://github.com/andangel/luci-app-caddy/releases/latest/download/caddy_linux_arm64"
 
-o = s:option(Button, "download", translate("下载"))
-o.inputtitle = translate("下载")
-o.description = translate("从 下载地址 下载 caddy 二进制覆盖 主程序 路径, 并重启 Caddy")
-o.inputstyle = "apply"
+o = s:option(Button, "download", translate("下载并重启"))
 o.rawhtml = true
 o.template = "caddy/download"
 
