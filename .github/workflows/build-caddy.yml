@@ -1,0 +1,81 @@
+# 编译带自定义插件的 Caddy 二进制 (luci-app-caddy 的 [状态] 页 下载按钮 用).
+# 配方与本机会话验证过的 go-setup/caddy-build/ 完全一致:
+#   caddy v2.11.4 + caddy-dns/alidns (DNS-01) + caddy-aliyun-ddns (DDNS 块)
+# 触发: GitHub Actions 页手动点 Run workflow (workflow_dispatch).
+# 产物: caddy_linux_arm64 上传为 Release artifact, [状态] 页 下载地址 填该 URL 即可.
+
+name: build-caddy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-latest
+
+    env:
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: 0
+      GOFLAGS: -buildvcs=false
+      GOPROXY: https://goproxy.cn,direct   # 国内网络兜底; 失败可改回 官方 proxy.golang.org,direct
+
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: false   # main.go 极简且 go mod tidy 会更新 go.sum, 不开缓存避免版本漂移
+
+      - name: Build Caddy
+        run: |
+          set -euo pipefail
+          export PATH="$PATH:$(go env GOPATH)/bin"
+
+          echo "module mycaddy" > go.mod
+          go mod edit \
+            -require=github.com/caddyserver/caddy/v2@v2.11.4 \
+            -require=github.com/caddy-dns/alidns@v1.0.29 \
+            -require=github.com/liwei19920307/caddy-aliyun-ddns@v0.0.0-20260902095825-52410ef789e8
+
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+          	_ "time/tzdata"
+          	_ "github.com/caddy-dns/alidns"
+          	_ "github.com/caddyserver/caddy/v2/modules/standard"
+          	caddycmd "github.com/caddyserver/caddy/v2/cmd"
+          	_ "github.com/liwei19920307/caddy-aliyun-ddns"
+          )
+
+          func main() { caddycmd.Main() }
+          EOF
+
+          go mod tidy
+
+          echo "GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=$CGO_ENABLED building..."
+          go build -o caddy_linux_arm64 .
+
+          echo "=== 校验: 模块清单 ==="
+          ./caddy_linux_arm64 list-modules | grep -Ei 'caddy.dns.providers.alidns|caddy.globaloptions.aliyun_ddns' \
+            && echo "OK: alidns + aliyun_ddns 两个自定义指令均在二进制内"
+
+          ls -lh caddy_linux_arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-linux-arm64-v2.11.4-alidns-aliyun-ddns
+          path: caddy_linux_arm64
+          if-no-files-found: error
+
+      # --- 可选: 同时发 Release (方便 [状态] 页直接拿稳定 URL). 默认注释, 想要就解开 ---
+      # - name: Create Release
+      #   uses: softprops/action-gh-release@v2
+      #   with:
+      #     tag_name: "caddy-2.11.4-arm64"
+      #     files: caddy_linux_arm64
+      #     body: "Caddy v2.11.4 + alidns DNS-01 + aliyun_ddns, linux/arm64, 静态 (CGO=0)"
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
