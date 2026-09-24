@@ -36,7 +36,7 @@ o.wrap = "off"
 o:depends("ddns_on", "1")
 
 o = s:option(ListValue, "ddns_wan_iface", translate("IP 获取方式"),
-	translate("public = 公网查询 (打 api.ipify.org 等取出口 IP); 选接口 = 直读该网卡 IPv4. 一般填 pppoe-wan, 下拉自动列出路由器实际接口"))
+	translate("public = 公网查询 (api.ipify.org 等取出口 IP); 选接口 = 直读该网卡 IPv4. 一般填 pppoe-wan, 下拉自动列出路由器实际接口"))
 o:value("public")
 local netf = io.popen("ls /sys/class/net 2>/dev/null")
 if netf then
