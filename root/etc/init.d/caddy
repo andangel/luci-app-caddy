@@ -198,13 +198,8 @@ generate_caddyfile() {
 
 			if [ -n "$key" ]; then
 				echo
-				echo "	# Caddy 层 API key 校验"
-				echo "	@health path /health"
+				echo "	# Caddy 层 API key 校验: 除 @apikey 外一律 404 (/health 也需带 key)"
 				echo "	@apikey header Authorization \"Bearer $key\""
-				echo
-				echo "	handle @health {"
-				echo "		reverse_proxy $tgt { flush_interval -1 }"
-				echo "	}"
 				echo
 				echo "	handle @apikey {"
 				echo "		reverse_proxy $tgt { flush_interval -1 }"
