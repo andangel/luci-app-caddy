@@ -3,7 +3,8 @@ local m, s, o
 -- 手动 Caddyfile 编辑: 路径从 UCI caddy_file 取 (默认 /etc/caddy/Caddyfile),
 -- 与 init.d 里 G_FILE 一致, 避免用户在 [状态] 页改 bin_dir/log_dir 后此处仍写死路径.
 local uci = require("luci.model.uci").cursor()
-local cf_file = uci:get_first("caddy", "caddy_file") or "/etc/caddy/Caddyfile"
+-- get_first 返回的是 section name 而非字段值, 必须用 get(cfg, section, key) 取字段
+local cf_file = uci:get("caddy", "caddy", "caddy_file") or "/etc/caddy/Caddyfile"
 
 local cur_caddyfile
 local cfh = io.open(cf_file, "r")

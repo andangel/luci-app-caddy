@@ -21,7 +21,6 @@ end
 
 function caddy_status()
 	local e={}
-          local sys  = require "luci.sys"
 	local uci  = require "luci.model.uci".cursor()
 	-- Web 界面按钮地址: 取第一个 proxy host 的 域名:端口, 没有则留空
 	local weburl = ""

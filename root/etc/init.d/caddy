@@ -246,6 +246,8 @@ generate_caddyfile() {
 		done
 	} > "$cf"
 	mv -f "$cf" "$G_FILE"
+	# DDNS/AK secret 明文在文件里, 收紧权限只让 root 读写 (LuCI CGI 同以 root 运行, 不受影响)
+	chmod 600 "$G_FILE"
 
 	# 一次性迁移: wildcard 旧字段. 通配符选择已挪到 Host 页下拉, Domain 页不再显示该字段,
 	# 而 CBI 保存只写页面已定义字段、不删未定义键 → 旧 wildcard 键会永久残留 UCI. 有就删.
