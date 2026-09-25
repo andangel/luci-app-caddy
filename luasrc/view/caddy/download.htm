@@ -14,6 +14,9 @@
 <div id="<%=self.option%>-msg"></div>
 <script type="text/javascript">//<![CDATA[
 	var cdl_tid = null;
+	// 点击后的宽限窗口(ms 时间戳): 控制器先删旧 status 再启脚本, 新脚本要过 TOT 探测(几秒~几十秒)才写第一个 status,
+	// 这段空窗轮询回来是 idle, 若按普通 idle 停轮询就再也没人刷新了 → 窗口内的 idle 保持轮询, 终态(done/error/stopped)照常停
+	var cdl_until = 0;
 	function cdl_mb(n){ return (n/1048576).toFixed(2) + ' MB'; }
 	function cdl_esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 	function cdl_render(rv)
@@ -39,7 +42,8 @@
 		pct.innerHTML = text;
 		var st = rv.state || 'idle';
 		// 定时器由这里统一管理: 下载/暂停/校验中保持轮询, 结束(done/error/stopped)则停
-		var active = (st === 'downloading' || st === 'paused' || st === 'verifying');
+		// 窗口内的 idle(启动空窗)也算活动, 否则首次轮询落在空窗里就把轮询停死, UI 永远 idle
+		var active = (st === 'downloading' || st === 'paused' || st === 'verifying' || (st === 'idle' && Date.now() < cdl_until));
 		if (active && !cdl_tid) cdl_tid = setInterval(cdl_poll, 1500);
 		else if (!active && cdl_tid) { clearInterval(cdl_tid); cdl_tid = null; }
 		// 进度条
@@ -86,6 +90,7 @@
 	function caddy_dl_start(btn)
 	{
 		btn.disabled = true; btn.value = '<%:启动中...%>';
+		cdl_until = Date.now() + 60000;   // 60s 宽限: 覆盖 控制器删旧 status → 新脚本 TOT 探测 → 第一个进度 的空窗
 		XHR.get('<%=luci.dispatcher.build_url("admin","network","caddy","download")%>', null, function(x, rv){
 			cdl_poll();
 		});
